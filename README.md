@@ -1,15 +1,39 @@
 # unifi-cli
 
-Changing the 5 GHz channel on five access points through the UniFi web UI takes
-about sixty clicks. Every one of them is a single command here.
+A way to integrate UniFi networks into Claude Code — or any other agent, script,
+or shell.
 
-The bigger problem is that the UI won't show you most of what your controller
-already knows. Radio policy, PMF mode, fast-roaming state, the RF policy that
-quietly overrides the channel you just pinned — all of it is sitting in the
-controller's Mongo database, and none of it has a page in the web app.
+## Why you'd use it
 
-`unifi-cli` is a single-file Python CLI that reads the whole database and writes
-through the official API.
+Your coding agent can read your codebase, run your tests and fix your CI. It
+cannot tell you why AirDrop stopped working, which access point your laptop is
+actually on, or what changed when the wifi got slow. It has no way to see your
+network.
+
+This gives it one. Point it at your controller and the network becomes something
+you ask questions of:
+
+> **"Why does Universal Control keep dropping?"**
+> It reads every radio, finds the access point serving your Macs sitting on a DFS
+> channel, and tells you Apple's peer-to-peer stack is banned there. Nothing in
+> the web UI would have told you that.
+
+> **"Which ports are open to the internet?"** · **"Is IPS actually enabled, or
+> just configured?"** · **"What's my slowest client and which AP is it on?"**
+
+> **"Move the study AP to channel 44."**
+> Done — with the whole-object `PUT` handled correctly, which is the mistake that
+> otherwise wipes the rest of the config.
+
+Two reasons it's a tool rather than a thin API wrapper. The controller knows far
+more than it renders: radio policy, PMF mode, fast-roaming state, the RF policy
+quietly overriding the channel you just pinned — none of that has a page in the
+web app, and all of it is readable here. And the failure modes have to travel
+*with* the tool, or an agent walks straight into them — which is why the
+[bundled skill](#claude-code-skill) carries them.
+
+It's a single file of Python with no dependencies, so "install" means copying it
+somewhere.
 
 ## Two transports, deliberately
 
