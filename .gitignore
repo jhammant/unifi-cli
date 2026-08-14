@@ -1,0 +1,22 @@
+# Credentials — never commit. UNIFI_PASS lives here.
+.env
+.env.local
+
+# Capture output from uc-watch.sh
+uc-watch/
+*.tsv
+events.log
+
+# Scratch
+scratch/
+scratchpad/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store
