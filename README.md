@@ -208,6 +208,20 @@ It carries one warning worth repeating: **do not poll
 channel and starves AWDL and BLE — it *causes* the exact dropout the script
 exists to observe. `ipconfig getsummary` reads cached state and costs nothing.
 
+## Claude Code skill
+
+The repo ships a [Claude Code](https://claude.com/claude-code) skill at
+`.claude/skills/unifi/SKILL.md`. Clone the repo, open it in Claude Code, and
+`/unifi` is available — or ask a plain question like *"why does AirDrop keep
+dropping?"* and it triggers on its own.
+
+It carries the command reference **and** the rules below, so the model knows to
+`GET` before it `PUT`s, knows not to put a Mac-facing AP on a DFS channel, and
+knows never to write to Mongo directly. That last part matters most: the
+failure modes here are the kind an agent walks straight into.
+
+Copy it to `~/.claude/skills/unifi/` to use it from anywhere.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
