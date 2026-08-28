@@ -215,8 +215,101 @@ def json_shell_quote(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+COLLECTION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Operators that make the server evaluate JavaScript. Binding the filter as
+# data is not much use if the data itself asks mongod to run code.
+JS_EVAL_OPS = ("$where", "$function", "$accumulator")
+
+
+def shell_query_to_json(q):
+    """Rewrite mongo shell object syntax into strict JSON.
+
+    The shell accepts bare keys ({name:"guest"}) and single-quoted strings;
+    neither is JSON. Rewriting has to respect string literals, so this walks
+    the input rather than reaching for a regex: a bare key inside a string
+    value is not a key.
+    """
+    out, i, n = [], 0, len(q)
+    while i < n:
+        c = q[i]
+        if c in "\"'":
+            quote, buf, i = c, ['"'], i + 1
+            while i < n and q[i] != quote:
+                if q[i] == "\\" and i + 1 < n:
+                    nxt = q[i + 1]
+                    # \' is only an escape inside single quotes; in JSON it is not
+                    buf.append("'" if (quote == "'" and nxt == "'") else q[i] + nxt)
+                    i += 2
+                    continue
+                buf.append('\\"' if q[i] == '"' else q[i])
+                i += 1
+            if i >= n:
+                raise ValueError("unterminated string")
+            out.append("".join(buf) + '"')
+            i += 1
+            continue
+        if c.isalpha() or c in "_$":
+            j = i
+            while j < n and (q[j].isalnum() or q[j] in "_$."):
+                j += 1
+            word, k = q[i:j], j
+            while k < n and q[k].isspace():
+                k += 1
+            if k < n and q[k] == ":":
+                out.append(json.dumps(word))      # bare key -> quoted key
+            elif word in ("true", "false", "null"):
+                out.append(word)
+            else:
+                raise ValueError(f"unsupported token {word!r}")
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def reject_js_operators(node):
+    """Refuse server-side JavaScript anywhere in the filter, at any depth."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in JS_EVAL_OPS:
+                die(f"{k} is not allowed in --query: it runs JavaScript on the controller")
+            reject_js_operators(v)
+    elif isinstance(node, list):
+        for item in node:
+            reject_js_operators(item)
+
+
+def parse_query(q):
+    """Parse a mongo filter into Python data. Never returns a string to splice."""
+    for candidate in (lambda: json.loads(q), lambda: json.loads(shell_query_to_json(q))):
+        try:
+            parsed = candidate()
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(parsed, dict):
+            die(f"--query must be an object, got {type(parsed).__name__}")
+        reject_js_operators(parsed)
+        return parsed
+    die(
+        f"cannot parse --query as a mongo filter: {q}\n"
+        "  Queries are parsed into data and bound to a variable rather than\n"
+        "  spliced into JavaScript, so they must be expressible as JSON.\n"
+        "  supported:    '{name:\"guest\"}'  '{vlan:{$gt:10}}'  '{enabled:true}'\n"
+        "  unsupported:  /regex/, ObjectId(...), new Date(...), function bodies"
+    )
+
+
 def read_collection(name, query="{}", soft=False):
-    js = f"db.{name}.find({query}).forEach(function(d){{print(JSON.stringify(d))}})"
+    if not COLLECTION_RE.match(name):
+        die(f"invalid collection name: {name}\n"
+            "  expected a plain identifier, e.g. wlanconf, device, networkconf")
+    # The filter is bound to a variable as a JSON literal and the collection is
+    # indexed by string, so neither argument is ever evaluated as JavaScript.
+    js = (f"var q = {json.dumps(parse_query(query))};"
+          f"db[{json.dumps(name)}].find(q)"
+          ".forEach(function(d){print(JSON.stringify(d))})")
     return mongo(js, soft=soft)
 
 
