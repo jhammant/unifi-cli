@@ -66,11 +66,69 @@ HOST = os.environ.get("UNIFI_HOST", "192.168.1.1")
 SSH_ALIAS = os.environ.get("UNIFI_SSH", "udm")
 SITE = os.environ.get("UNIFI_SITE", "default")
 
+# Field names that mean "credential". Deliberately over-broad: an unnecessary
+# redaction costs a --raw re-run, a missed one puts a live secret in a
+# scrollback buffer. `read` dumps collections whose schema is Ubiquiti's and
+# changes with firmware, so anything resembling a secret is treated as one.
+#
+# _ b is a token boundary for snake_case: \b does not fire on "_", so \bpass\b
+# would sail straight past auth_pass.
+_B = r"(?:^|[^a-z0-9])"
+_E = r"(?:$|[^a-z0-9])"
 SECRET_RE = re.compile(
-    r"passphrase|password|secret|_psk\b|^psk$|priv(ate)?_key|x_shadow|"
-    r"sha512passwd|token|x_mgmt_key|dh_key|certificate_key",
+    # passwords and their hashes
+    r"passw|passphrase|" + _B + r"pass" + _E + r"|" + _B + r"pwd" + _E + r"|"
+    r"passwd|shadow|" + _B + r"hash" + _E + r"|" + _B + r"salt" + _E + r"|"
+    # shared secrets: x_ipsec_pre_shared_key spells out what x_psk abbreviates
+    r"secret|credential|" + _B + r"creds?" + _E + r"|"
+    r"pre[-_ ]?shared|preshared|" + _B + r"psk" + _E + r"|"
+    # bearer credentials and sessions
+    r"token|" + _B + r"jwt" + _E + r"|bearer|oauth|cookie|session[-_]?(id|secret)|"
+    # SNMP community strings are passwords wearing a different word
+    r"community|"
+    # second factors and recovery material
+    r"" + _B + r"(otp|totp|mfa|2fa)" + _E + r"|recovery[-_]?code|backup[-_]?code|"
+    r"" + _B + r"seed" + _E + r"|" + _B + r"pin" + _E + r"|" + _B + r"puk" + _E + r"|"
+    # private-key containers (the cert itself is public; the bundle is not)
+    r"keystore|truststore|" + _B + r"(pem|pfx|p12)" + _E + r"|hmac|"
+    # payment settings live in the hotspot config
+    r"cvv|cvc|card_?number|iban|merchant|"
+    r"license",
     re.I,
 )
+
+# Half the credential fields in this schema are just *_key — x_mgmt_key,
+# x_authkey, x_iapp_key, x_vwire_key, x_wireguard_private_key — and the set
+# grows every release. So "key" anywhere means redact, minus the handful of
+# spellings that are genuinely public or structural. `key` on its own is the
+# settings section name ("mgmt", "ips"); redacting it would gut `settings`.
+KEYISH_RE = re.compile(r"key", re.I)
+SAFE_KEY_RE = re.compile(
+    r"^key$|^keys$|pub(lic)?_?key|"
+    r"key_?(type|size|len|length|mgmt|id|idx|index|exchange|algo|algorithm|"
+    r"name|format|usage|version|status|enabled|caching|rotation|expiry)|"
+    r"keyword|keyboard|hotkey",
+    re.I,
+)
+
+# Last line of defence for a secret in an innocuously named field: shapes that
+# are never anything but credentials.
+SECRET_VALUE_RE = re.compile(
+    r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|"          # PEM key material
+    r"\bsk_(live|test)_[0-9A-Za-z]|"                      # Stripe secret keys
+    r"\bghp_[0-9A-Za-z]{20,}|\bxox[baprs]-[0-9A-Za-z-]+|" # GitHub / Slack
+    r"\bAKIA[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{20,}|"     # AWS / Google
+    r"\beyJ[0-9A-Za-z_-]{8,}\.eyJ[0-9A-Za-z_-]{8,}"       # JWT
+)
+
+
+def is_secret_name(name):
+    """True if a field name suggests it holds a credential."""
+    if not isinstance(name, str):
+        return False
+    if SECRET_RE.search(name):
+        return True
+    return bool(KEYISH_RE.search(name) and not SAFE_KEY_RE.search(name))
 
 
 # ---------------------------------------------------------------- helpers
@@ -85,11 +143,16 @@ def redact(obj):
     """Recursively blank anything that looks like a credential."""
     if isinstance(obj, dict):
         return {
-            k: ("<redacted>" if SECRET_RE.search(k) and v else redact(v))
+            # A bool is never a credential, and hiding it would blank exactly the
+            # posture flags this tool exists to report (x_ssh_auth_password_enabled).
+            k: ("<redacted>" if is_secret_name(k) and v and not isinstance(v, bool)
+                else redact(v))
             for k, v in obj.items()
         }
     if isinstance(obj, list):
         return [redact(x) for x in obj]
+    if isinstance(obj, str) and SECRET_VALUE_RE.search(obj):
+        return "<redacted>"
     return obj
 
 
