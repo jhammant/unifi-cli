@@ -277,14 +277,23 @@ def view_networks():
 
 
 def view_devices():
-    return [{
-        "name": d.get("name"),
-        "model": d.get("model"),
-        "version": d.get("version"),
-        "ip": d.get("ip"),
-        "adopted": d.get("adopted"),
-        "uplink": (d.get("uplink") or {}).get("type") if isinstance(d.get("uplink"), dict) else None,
-    } for d in read_collection("device")]
+    out = []
+    for d in read_collection("device"):
+        # last_uplink is authoritative. A top-level uplink_ap_mac can survive a
+        # move from mesh to wire, so a wired AP may still carry one — never
+        # infer the uplink from it.
+        up = d.get("last_uplink")
+        up = up if isinstance(up, dict) else {}
+        out.append({
+            "name": d.get("name"),
+            "model": d.get("model"),
+            "version": d.get("version"),
+            "ip": d.get("ip"),
+            "adopted": d.get("adopted"),
+            "uplink_type": up.get("type"),
+            "uplink_device": up.get("uplink_device_name"),
+        })
+    return out
 
 
 def view_settings(key=None):
