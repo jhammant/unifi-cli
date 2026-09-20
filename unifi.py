@@ -165,15 +165,39 @@ def emit(data, raw=False):
 # ---------------------------------------------------------------- mongo
 
 
-def mongo(js):
-    """Run a JS snippet against the controller DB over SSH. Read-only by convention."""
+class ControllerUnreachable(Exception):
+    """The controller DB could not be reached. Carries the reason as its message."""
+
+
+def ssh_reason(stderr):
+    """The most useful single line out of ssh's noise."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    if not lines:
+        return "no output from ssh"
+    line = lines[-1]          # banners and warnings come first; the error is last
+    if line.lower().startswith("ssh: "):
+        line = line[5:]
+    return line[:160]
+
+
+def mongo(js, soft=False):
+    """Run a JS snippet against the controller DB over SSH. Read-only by convention.
+
+    Returns a list of documents. With soft=True an unreachable controller
+    raises ControllerUnreachable, carrying the reason, instead of exiting — so
+    a caller whose job is to report on connectivity can survive it being down.
+    """
     cmd = ["ssh", "-o", "BatchMode=yes", SSH_ALIAS,
            f"mongo --quiet --port 27117 ace --eval {json_shell_quote(js)}"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     except subprocess.TimeoutExpired:
+        if soft:
+            raise ControllerUnreachable("timed out after 90s")
         die(f"ssh {SSH_ALIAS} timed out")
     if out.returncode != 0:
+        if soft:
+            raise ControllerUnreachable(ssh_reason(out.stderr))
         die(f"ssh {SSH_ALIAS} failed: {out.stderr.strip()[:300]}")
     docs = []
     for line in out.stdout.splitlines():
@@ -191,9 +215,9 @@ def json_shell_quote(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def read_collection(name, query="{}"):
+def read_collection(name, query="{}", soft=False):
     js = f"db.{name}.find({query}).forEach(function(d){{print(JSON.stringify(d))}})"
-    return mongo(js)
+    return mongo(js, soft=soft)
 
 
 def list_collections():
@@ -421,14 +445,26 @@ def main():
         body = json.loads(args.body) if args.body else None
         emit(Api().login().call(args.method, args.path, body), args.raw)
     elif args.cmd == "whoami":
-        ok_ssh = bool(read_collection("site"))
+        # soft=True: a dead SSH path has to be reportable, not fatal — telling
+        # you which half is live is this command's entire purpose.
+        try:
+            docs = read_collection("site", soft=True)
+            ssh_ok = True
+            ssh_state = "ok — reads available" if docs else \
+                        "connected, but returned no documents"
+        except ControllerUnreachable as e:
+            ssh_ok = False
+            ssh_state = f"FAILED — {e}"
         creds = bool(os.environ.get("UNIFI_USER") and os.environ.get("UNIFI_PASS"))
         print(f"host          {HOST}  (site: {SITE})")
-        print(f"ssh {SSH_ALIAS:<10}{'ok — reads available' if ok_ssh else 'FAILED'}")
+        print(f"ssh           {SSH_ALIAS}  —  {ssh_state}")
         print(f"api creds     {'present — writes available' if creds else 'missing — reads only'}")
         if creds:
             me = Api().login().call("GET", "/self")
-            print(f"api login     ok as {me.get('data',[{}])[0].get('name','?')}")
+            # 'data' can be present but empty; the [{}] default alone does not cover that.
+            print(f"api login     ok as {(me.get('data') or [{}])[0].get('name','?')}")
+        if not ssh_ok:
+            sys.exit(1)
 
 
 if __name__ == "__main__":
